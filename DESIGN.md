@@ -1,130 +1,177 @@
-# Payout Success Predictor — Project Design
+# Payout Success & Failure-Reason Predictor
 
-> A small, end-to-end ML service that predicts whether a freelancer **payout will succeed or fail** at the moment it's initiated, exposed over an API. Built as a learning project on **synthetic** data modeled on real payout-risk intuition (no real or confidential data).
+**Author:** Bharat Talwar
+**Origin:** Internal hackathon proof-of-concept
+**Status:** POC on synthetic data (no real or confidential data is used)
+
+> **In one line:** At the moment a freelancer payout is initiated, this service predicts whether it will **succeed** — and if not, **which failure reason** is most likely — and exposes that prediction over an API so any payout service can call it in real time. The data is synthetic, modeled on payout behavior I worked with on a marketplace payments platform.
 
 ---
 
 ## 1. Problem Statement
 
-In a global payments platform, money-out (payouts) to freelancers sometimes **fails or is rejected** after initiation — due to high-risk destination corridors, KYC/name mismatches, stale accounts, or unusually large amounts. Each failure creates downstream cost: support tickets, delayed funds, retries, and a poor freelancer experience.
+On a global marketplace, we move money **out** to freelancers across many rails (local bank/DLB, Wise, Thunes wallets, Payoneer, PayPal, ACH, wire) and many corridors. A meaningful share of payouts — especially **batch weekly payouts** that go out automatically for hourly work — fail or get held. In practice the biggest culprits were **method-of-payment (MOP) issues** and **bank/IBAN validation**, not funding (this is money out, so an account balance is never the constraint).
 
-Today these failures are mostly discovered **after** they happen. The question this project explores:
+The pain was that failures were mostly discovered **after** the attempt: a payout would fail, a ticket would open, the freelancer would wait, and only then would someone fix the underlying MOP or bank detail.
 
-> *Given the attributes of a payout at the moment it is initiated, can we predict the probability that it will succeed — early enough to act on it (route differently, warn, hold, or verify)?*
+I wanted to answer a sharper question at the moment of initiation:
 
-This is a **binary classification** problem: predict `success` (1) vs `failure` (0) from a handful of payout features.
+> *Will this payout succeed — and if not, what is the most likely reason it will fail?*
+
+Predicting the **reason**, not just success/failure, is what makes the output actionable: ops (or an automated flow) can re-verify a stale MOP, prompt the freelancer to correct bank details, or hold a high-risk corridor payout — **before** the failed attempt happens.
 
 ---
 
 ## 2. Product Requirements (PRD)
 
 ### Background & motivation
-A predictive "payout success score" lets operations and risk teams move from reactive cleanup to proactive handling — improving payout success rate, reducing support load, and improving freelancer trust.
+A real-time "payout outcome" prediction lets us shift from reactive cleanup to proactive prevention — lifting payout success rate, cutting support load, and getting freelancers paid on time. I built this as a hackathon POC to show the idea was feasible end to end; in a real rollout, our product and data-analytics partners would own the rigorous feature research.
 
 ### Goals
-- Predict the probability a payout will succeed from its features.
-- Expose the prediction as a **real-time API** that any service can call.
-- Be **explainable** enough to trust (which features drive the score).
-- Compare a **classic model (decision tree)** against a **neural network** to understand the trade-offs.
+- Predict, at initiation, the **outcome class**: `SUCCESS` or a specific failure reason.
+- Expose it as a **real-time API** any payout/orchestration service can call.
+- Keep it **explainable** enough to trust and act on (which features drove the prediction).
+- Compare a **decision-tree baseline** with a **neural network** to understand the trade-offs.
 
 ### Non-goals
 - Not a production fraud/AML system.
-- Not trained on real data (synthetic only, for learning).
-- No real-time/online learning; training is offline and batch.
+- Not trained on real data — synthetic only, for the POC.
+- No online/real-time training; training is offline and batch.
 - No UI beyond the API and its auto-generated docs.
 
 ### Users & use cases
-- **Payout orchestration service** — calls the API at initiation to get a success score and decide routing/hold.
-- **Risk/Operations** — reviews scores and the features driving them.
-- **(Learning) the author** — to master the full ML lifecycle end to end.
+- **Payout orchestration service** — calls at initiation; uses the predicted reason to route, hold, or trigger a fix.
+- **Risk / Operations** — reviews predicted failure reasons and the drivers behind them.
 
 ### Functional requirements
-1. Generate a reproducible synthetic dataset of payout attempts.
-2. Train and evaluate a decision-tree model (baseline) and a neural-net model.
-3. Persist the trained model and any preprocessing (e.g., feature scaler).
-4. Serve a `/predict` endpoint that accepts payout features and returns a success probability + predicted class.
-5. Provide input validation and clear error responses.
+1. Generate a reproducible synthetic dataset of payout attempts with realistic feature correlations.
+2. Train and evaluate a decision tree (baseline) and a neural network (multi-class).
+3. Persist the trained model and preprocessing artifacts (encoders/scaler).
+4. Serve a `/predict` endpoint returning the predicted outcome class **and** the probability of each class.
+5. Validate inputs and return clear error responses.
 
 ### Non-functional requirements
 - **Latency:** single prediction < ~100 ms.
-- **Reproducibility:** fixed random seeds; same data and results every run.
+- **Reproducibility:** fixed seeds; identical data and results each run.
 - **Testability:** model and API independently testable.
-- **Documentation:** this design doc + a README + auto-generated API docs.
+- **Documentation:** this design doc, a README, and auto-generated API docs.
 
 ### Success metrics
-- Model **accuracy / ROC-AUC** on a held-out test set clearly beats the majority-class baseline (~0.51).
-- `/predict` returns correct, validated responses for valid and invalid inputs.
-- Author can explain every component and every line.
+- **Macro-F1** (not just accuracy) clearly beats the majority-class baseline — because the classes are imbalanced and I care about catching the *failure* reasons, not just the common SUCCESS case.
+- Correct, validated `/predict` responses for valid and invalid inputs.
+- I can explain every component and every line.
 
 ---
 
-## 3. High-Level Design (HLD)
+## 3. Data Model
 
-### Architecture overview
+### Target — multi-class outcome
+| Class | Meaning | |
+|---|---|---|
+| `SUCCESS` | Payout completes on first attempt | |
+| `FAIL_NAME_MISMATCH` | Beneficiary name doesn't match the account — name is added with the MOP *after* KYC, and special characters break the match | **top failure** |
+| `FAIL_MOP` | Method-of-payment issue (unverified / stale / newly-changed MOP) | **top failure** |
+| `FAIL_BANK_VALIDATION` | Invalid bank account / IBAN / routing — often a stale IBAN the bank rotated and we never refreshed | **top failure** |
+| `FAIL_AMOUNT_LIMIT` | Large payout hits a limit or triggers manual review | **top failure** |
+| `FAIL_KYC` | KYC pending/expired or missing tax form | rare |
+| `FAIL_CORRIDOR_VENDOR` | High-risk corridor or vendor unable to deliver | rare |
+| `FAIL_COMPLIANCE` | Sanctions/watchlist hit or security hold | rare |
+
+By design, `SUCCESS` is the majority (~64%), and the four failure modes I saw most in practice — **name mismatch, MOP issues, bank/IBAN validation, and amount/limit** — form a clear top tier (~7–10% each), while KYC, corridor/vendor, and compliance failures stay rare. That realistic **class imbalance** (a few common outcomes, several rare ones) is something I handle in evaluation with macro-F1, per-class metrics, and class weighting — rather than hide behind raw accuracy.
+
+### Features (26)
+| Group | Feature | Type | Signal |
+|---|---|---|---|
+| **Payout** | `amount_usd` | num | Large payouts hit limits / manual review — **top failure driver** |
+| | `payout_method` | cat | dlb_bank / wise / thunes_wallet / payoneer / paypal / ach / wire |
+| | `destination_region` | cat | NA / EU / LATAM / SSA / MENA / SEA / SA |
+| | `corridor_risk_score` | num 0–1 | Higher → corridor/vendor failures |
+| | `fx_required` | bool | Conversion adds failure modes |
+| | `faster_payout_flag` | bool | Instant rails apply stricter checks |
+| | `initiated_weekend` | bool | Vendor cut-off windows |
+| | `is_batch_payout` | bool | Batch weekly payouts → MOP/bank failures |
+| **Account history** | `account_age_days` | num | Newer → riskier |
+| | `prior_successful_payouts` | num | Track record → success |
+| | `historical_failure_rate` | num 0–1 | Past failures predict future |
+| | `days_since_last_payout` | num | Dormancy → stale details |
+| | `top_rated_status` | cat 0–3 | Vetted freelancers succeed more |
+| | `prior_returns_count` | num | Past returned payouts |
+| | `dispute_chargeback_count` | num | Dispute history → compliance holds |
+| **Method & verification** | `mop_age_days` | num | Freshly added MOP → failure |
+| | `mop_verified` | bool | Unverified MOP → failure |
+| | `bank_account_valid` | bool | Invalid IBAN/routing → hard failure |
+| | `bank_detail_age_days` | num | Old bank record → bank may have rotated the IBAN → stale/invalid |
+| | `name_match_score` | num 0–1 | Low → name-mismatch failure |
+| | `name_has_special_chars` | bool | Special characters in the name break beneficiary matching |
+| | `kyc_status` | cat | verified / pending / expired |
+| | `tax_form_on_file` | bool | Missing W-8/W-9 → hold |
+| **Compliance & risk** | `sanctions_watchlist_hit` | bool | Hit → block |
+| | `recent_bank_change_flag` | bool | Recent change → security hold |
+| | `vendor_corridor_success_rate_30d` | num 0–1 | Failing rail → this payout likely fails |
+
+### Synthetic data approach
+I generate each feature from a plausible distribution, then derive the outcome from a transparent scoring function: each failure reason has a score driven by its real-world causes, `SUCCESS` has a baseline boosted by good history, and the outcome is the highest-scoring class plus noise (so it's probabilistic, not deterministic). The strong, deliberate correlations I bake in mirror what I actually observed:
+
+- **Amount** — larger payouts sharply raise `FAIL_AMOUNT_LIMIT` (limit/review thresholds).
+- **Name** — a low `name_match_score` or `name_has_special_chars = 1` drives `FAIL_NAME_MISMATCH`, reflecting that the beneficiary name is captured with the MOP *after* KYC, so it can diverge from the verified identity.
+- **Bank/IBAN** — `bank_account_valid = 0` (more likely when `bank_detail_age_days` is high, i.e., the bank rotated the IBAN and we hold a stale one) drives `FAIL_BANK_VALIDATION`, amplified for batch payouts.
+- **MOP** — unverified or freshly-changed methods drive `FAIL_MOP`, again worse for batch runs.
+
+Baking in **known, defensible correlations** is what lets the model learn something real — and lets me explain *why* it predicts what it does.
+
+---
+
+## 4. High-Level Design (HLD)
+
+### Architecture
 ```mermaid
 flowchart LR
     A[generate_data.py\nsynthetic payouts] --> B[payouts.csv]
-    B --> C[train.py\ntree + neural net]
-    C --> D[(model artifacts\nmodel.pt + scaler + tree.pkl)]
+    B --> C[train.py\ndecision tree + neural net]
+    C --> D[(artifacts\nmodel.pt + encoders + scaler)]
     D --> E[app.py\nFastAPI service]
-    E -->|/predict| F[Client\ncurl / Swagger UI / other services]
+    E -->|POST /predict| F[Client\ncurl / Swagger UI / payout service]
 ```
 
-### Data flow (single prediction)
+### Data flow — a single prediction
 ```mermaid
 flowchart LR
-    R[Payout features\nJSON] --> V[Validate\nPydantic schema]
-    V --> S[Scale features\nsaved scaler]
-    S --> M[Model\nforward pass]
-    M --> P[Probability of success]
-    P --> O[Response\nprob + class + label]
+    R[Payout features JSON] --> V[Validate\nPydantic schema]
+    V --> P[Preprocess\nencode categoricals + scale]
+    P --> M[Model\nforward pass -> softmax]
+    M --> O[Response\npredicted class + per-class probabilities]
 ```
-
-### Data model — features
-| Feature | Type | Meaning |
-|---|---|---|
-| `amount` | float | Payout amount (USD) |
-| `account_age_days` | int | Age of the freelancer account |
-| `prior_payouts` | int | Count of prior successful payouts |
-| `corridor_risk` | float 0–1 | Risk score of the destination corridor |
-| `mismatch_flags` | int 0–5 | KYC / name-mismatch flags |
-| `weekend` | 0/1 | Initiated on a weekend |
-| **`success`** (label) | 0/1 | 1 = succeeded, 0 = failed/rejected |
 
 ### Model approach & trade-offs
 | | Decision Tree (baseline) | Neural Network (PyTorch) |
 |---|---|---|
-| Interpretability | High (feature importances, visualizable rules) | Lower (weights are opaque) |
-| Setup | Trivial (`fit`) | Needs training loop, scaling, tuning |
-| Strength here | Fast, explainable baseline | Learns smooth/continuous relationships; scales to richer data |
-| Why include both | The honest baseline + the "how it was built before" refresher | The new skill: tensors, forward/backward pass, loss, optimizer |
+| Interpretability | High (feature importances) | Lower (opaque weights) |
+| Multi-class | Native | Softmax + cross-entropy |
+| Strength here | Fast, explainable reference | Learns smoother relationships; extends to richer data |
+| Why both | Honest baseline + the classic approach | The new skill: tensors, forward/backward pass, loss, optimizer |
 
-### Serving design
-- **FastAPI** app loads the trained model + scaler **once at startup**.
-- **Pydantic** model defines and validates the request body.
-- `POST /predict` → returns `{ success_probability, predicted_class, label }`.
-- **uvicorn** runs the server; FastAPI auto-generates interactive docs at `/docs`.
+### Evaluation (production-minded)
+Because the classes are imbalanced, I don't rely on accuracy alone. I evaluate with **macro-F1**, **per-class precision/recall**, and a **confusion matrix** to see *which* failure reasons the model confuses — and I use **class weighting** so the model doesn't just learn to always predict `SUCCESS`.
 
-### Artifacts produced
-- `payouts.csv` — the dataset
-- `model.pt` (+ `scaler.pkl`) — trained neural net and feature scaler
-- `tree.pkl` — baseline decision tree
-- `app.py` — the API service
-- `DESIGN.md` (this) + `README.md`
+### Serving
+- **FastAPI** loads the model + preprocessing artifacts **once at startup**.
+- **Pydantic** validates the request body.
+- `POST /predict` → `{ predicted_class, probabilities{...} }`.
+- **uvicorn** runs it; interactive docs auto-generated at `/docs`.
+
+### Artifacts
+`payouts.csv`, `model.pt` (+ encoders/scaler), `tree.pkl`, `app.py`, `DESIGN.md`, `README.md`.
 
 ### Failure modes & edge cases
-- **Invalid/missing fields** → 422 validation error from Pydantic (handled).
-- **Out-of-range values** (e.g., negative amount) → validated/clamped.
-- **Model file missing at startup** → fail fast with a clear error.
-- **Class imbalance / drift** (future, with real data) → monitor and retrain.
+- Invalid/missing fields → 422 validation error (Pydantic).
+- Unknown categorical value → handled by the encoder / mapped to an "unknown" bucket.
+- Model artifact missing at startup → fail fast with a clear error.
+- Class drift over time (with real data) → monitor macro-F1 and retrain.
 
 ### Future / productionization
-- Containerize with **Docker**; deploy to a cloud run target.
-- Add an **evaluation harness** (ROC-AUC, calibration) and basic monitoring.
-- Add **auth** and rate limiting.
-- Swap synthetic data for real data behind proper privacy controls; add a model registry/versioning.
+Containerize with Docker; deploy to a cloud run target; add an automated evaluation + monitoring job; add auth and rate limiting; replace synthetic data with real data behind privacy controls; add a model registry and versioning.
 
 ---
 
-## 4. Why this project (interview framing)
-This demonstrates the **full ML lifecycle** — problem framing → data → model (classic vs neural) → evaluation → **deployment behind an API** — grounded in a payments domain the author owned in production. It shows the author can not only build a model but **ship and serve** it, and reason about trade-offs, failure modes, and productionization like an architect.
+## 5. Why I built it this way
+I deliberately framed this as a small but *complete* system — problem framing, a documented data model, a baseline before a fancy model, honest evaluation under class imbalance, and a real served API — rather than a notebook that prints an accuracy number. It mirrors how I approach architecture in production: define the problem and the system of record first, design for failure and observability, and make the trade-offs explicit.

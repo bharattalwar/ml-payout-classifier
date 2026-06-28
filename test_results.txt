@@ -1,0 +1,37 @@
+PAYOUT PREDICTOR — TEST RESULTS
+Run: 2026-06-27T17:55:19
+================================================================
+
+--- Scenario predictions ---
+
+[Clean low-risk payout]
+   expected=SUCCESS  predicted=SUCCESS  (OK)  http=200
+   top probs: SUCCESS=1.00, FAIL_MOP=0.00, FAIL_AMOUNT_LIMIT=0.00
+
+[Very large amount]
+   expected=FAIL_AMOUNT_LIMIT  predicted=FAIL_AMOUNT_LIMIT  (OK)  http=200
+   top probs: FAIL_AMOUNT_LIMIT=1.00, SUCCESS=0.00, FAIL_BANK_VALIDATION=0.00
+
+[Name mismatch + special chars]
+   expected=FAIL_NAME_MISMATCH  predicted=FAIL_NAME_MISMATCH  (OK)  http=200
+   top probs: FAIL_NAME_MISMATCH=1.00, SUCCESS=0.00, FAIL_AMOUNT_LIMIT=0.00
+
+[Stale/invalid bank (batch)]
+   expected=FAIL_BANK_VALIDATION  predicted=FAIL_BANK_VALIDATION  (OK)  http=200
+   top probs: FAIL_BANK_VALIDATION=0.57, SUCCESS=0.42, FAIL_MOP=0.00
+
+[Unverified new MOP (batch)]
+   expected=FAIL_MOP  predicted=FAIL_MOP  (OK)  http=200
+   top probs: FAIL_MOP=0.67, SUCCESS=0.33, FAIL_AMOUNT_LIMIT=0.00
+
+[New risky account (observe)]
+   expected=?  predicted=FAIL_MOP  (OK)  http=200
+   top probs: FAIL_MOP=0.97, SUCCESS=0.02, FAIL_NAME_MISMATCH=0.00
+
+--- Input validation (expect HTTP 422) ---
+[name_match_score > 1]  http=422  (OK)
+[missing amount_usd]  http=422  (OK)
+[is_batch_payout = 9]  http=422  (OK)
+
+================================================================
+Scenario matches: 6/6
