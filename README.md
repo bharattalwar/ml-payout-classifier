@@ -28,13 +28,16 @@ Python · pandas / NumPy · scikit-learn (HistGradientBoosting, Pipeline, OneHot
 ## Project structure
 ```
 ml-payout-classifier/
-├── PayoutPredictor.ipynb   # exploration: data generation + model comparison
-├── train.py                # train the model, save model.joblib (preprocessing + classifier in one pipeline)
-├── app.py                  # FastAPI service: POST /predict, GET /health
-├── test_predict.py         # scenario + input-validation tests -> test_results.txt
-├── payouts.csv             # synthetic dataset
-├── DESIGN.md               # problem statement, PRD, high-level design
-├── dataPrepBasics.md       # notes on the data-generation functions
+├── generate_data.py          # create the synthetic dataset (configurable rows/seed) -> payouts.csv
+├── PayoutPredictor.ipynb     # exploration: data generation + model comparison
+├── train.py                  # train the model, save model.joblib (preprocessing + classifier in one pipeline)
+├── app.py                    # FastAPI service: POST /predict, GET /health
+├── test_predict.py           # scenario + input-validation tests -> test_results.txt
+├── payouts.csv               # synthetic dataset (produced by generate_data.py)
+├── DESIGN.md                 # problem statement, PRD, high-level design
+├── dataPrepBasics.md         # notes on the data-generation functions
+├── CONCEPTS_AND_INTERVIEW.md # ML concepts, algorithm comparison, interview Q&A
+├── requirements.txt
 └── README.md
 ```
 
@@ -44,14 +47,17 @@ ml-payout-classifier/
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt        # or: pip install pandas scikit-learn fastapi "uvicorn[standard]" joblib
 
-# 2. Train the model (writes model.joblib)
+# 2. (Optional) regenerate the dataset — payouts.csv is already included
+python generate_data.py                # or scale it up: python generate_data.py --rows 20000
+
+# 3. Train the model (writes model.joblib)
 python train.py
 
-# 3. Serve the API
+# 4. Serve the API
 uvicorn app:app
 #    interactive docs at http://127.0.0.1:8000/docs
 
-# 4. (Optional) Run the test scenarios
+# 5. (Optional) Run the test scenarios
 python test_predict.py                 # writes test_results.txt
 ```
 
